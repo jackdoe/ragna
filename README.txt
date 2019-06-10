@@ -36,3 +36,16 @@ example:
   its working!
 
 yey!
+
+# Name
+
+  ORIGIN/USAGE
+  Danish, Old Norse, Swedish
+
+  PRONUNCIATION
+  RAHG-na
+
+  MEANING
+  Giving advice
+
+  (from https://babynames.net/names/ragna)
