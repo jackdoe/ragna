@@ -26,9 +26,9 @@ var errNotFound = fmt.Errorf("NOTFOUND")
 $ sudo docker run -p 9042:9042 scylladb/scylla
 $ sudo docker exec -t -i $( sudo docker ps | grep scylla | awk '{ print $1 }') cqlsh
 
-CREATE KEYSPACE "baxx"  WITH REPLICATION = { 'class' : 'SimpleStrategy', 'replication_factor' : 1};
-CREATE TABLE baxx.blocks (id timeuuid, cid varchar, sha256 blob, size int, enckey blob, nonce blob, PRIMARY KEY(id));
-CREATE TABLE baxx.files (key ascii, namespace ascii, blocks frozen<list<uuid>>, modified_at timestamp, PRIMARY KEY (key, namespace));
+CREATE KEYSPACE "ragna"  WITH REPLICATION = { 'class' : 'SimpleStrategy', 'replication_factor' : 1};
+CREATE TABLE ragna.blocks (id timeuuid, cid varchar, sha256 blob, size int, enckey blob, nonce blob, PRIMARY KEY(id));
+CREATE TABLE ragna.files (key ascii, namespace ascii, blocks frozen<list<uuid>>, modified_at timestamp, PRIMARY KEY (key, namespace));
 
 $ ipfs daemon
 
@@ -39,7 +39,7 @@ func main() {
 	var pcluster = flag.String("cluster", "127.0.0.1", "comma separated values of the cassandra cluster")
 	var pblockSize = flag.Int("block-size", 4*1024*1024, "block size in bytes")
 	var pconsistency = flag.String("consistency", "ANY", "write consistency: ANY, ONE, TWO, THREE, QUORUM, ALL, LOCAL_QUORUM, EACH_QUORUM, LOCAL_ONE")
-	var pkeyspace = flag.String("keyspace", "baxx", "cassandra keyspace")
+	var pkeyspace = flag.String("keyspace", "ragna", "cassandra keyspace")
 	var pcapath = flag.String("capath", "", "ssl ca path")
 	var pkeypath = flag.String("keypath", "", "ssl key path")
 	var pcertpath = flag.String("certpath", "", "ssl cert path")
@@ -73,7 +73,7 @@ func main() {
 	defer session.Close()
 	log.Printf("bind to: %s, cassandra: %s/%s consistency: %s, block size: %d, ipfs: %s", *pbind, *pcluster, *pkeyspace, consistency, *pblockSize, *pipfs)
 	http.HandleFunc("/io/", func(w http.ResponseWriter, r *http.Request) {
-		p := strings.Trim(r.RequestURI, "/")
+		p := strings.Trim(r.URL.Path, "/")
 		split := strings.SplitN(p, "/", 3)
 		if len(split) != 3 {
 			http.Error(w, "must use /io/namespace-uuid/", 500)
@@ -84,8 +84,15 @@ func main() {
 		if r.Method == "PUT" || r.Method == "POST" {
 			body := r.Body
 			defer body.Close()
+			query := r.URL.Query()
 
-			err := WriteObject(*pblockSize, ns, key, body, session, sh)
+			pin := false
+			if pinValue, ok := query["pin"]; ok {
+				if len(pinValue) > 0 && pinValue[0] == "true" {
+					pin = true
+				}
+			}
+			err := WriteObject(*pblockSize, ns, key, body, session, sh, pin)
 			if err != nil {
 				http.Error(w, err.Error(), 500)
 			} else {
@@ -160,10 +167,11 @@ func DeleteObject(ns string, key string, session *gocql.Session, sh *shell.Shell
 	return nil
 }
 
-func WriteObject(blockSize int, ns string, key string, body io.Reader, session *gocql.Session, sh *shell.Shell) error {
+func WriteObject(blockSize int, ns string, key string, body io.Reader, session *gocql.Session, sh *shell.Shell, pin bool) error {
 	log.Infof("setting %s:%s", ns, key)
 	buf := make([]byte, blockSize)
 	ids := []gocql.UUID{}
+	addOpts := shell.Pin(pin)
 	for {
 		end := false
 		cursor := 0
@@ -205,7 +213,7 @@ func WriteObject(blockSize int, ns string, key string, body io.Reader, session *
 				return err
 			}
 
-			cid, err := sh.Add(bytes.NewReader(encrypted))
+			cid, err := sh.Add(bytes.NewReader(encrypted), addOpts)
 			if err != nil {
 				log.Warnf("error writing to ipfs, key: %s:%s, error: %s", ns, key, err.Error())
 				if err := DeleteTransaction(ids, session, sh); err != nil {
@@ -222,7 +230,7 @@ func WriteObject(blockSize int, ns string, key string, body io.Reader, session *
 				return err
 			}
 			ids = append(ids, id)
-			log.Infof("  key: %s:%s creating block id: %s [cid: %s], size %d, took %d", ns, key, id, cid, len(part), time.Since(t0).Nanoseconds()/1e6)
+			log.Infof("  key: %s:%s creating block id: %s [cid: %s pin: %v], size %d, took %d", ns, key, id, cid, pin, len(part), time.Since(t0).Nanoseconds()/1e6)
 		}
 		if end {
 			break
