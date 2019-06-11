@@ -3,16 +3,18 @@
 $ sudo docker run -p 9042:9042 scylladb/scylla
 $ sudo docker exec -t -i $( sudo docker ps | grep scylla | awk '{ print $1 }') cqlsh
 
+
+# create the tables
 CREATE KEYSPACE "ragna"  WITH REPLICATION = { 'class' : 'SimpleStrategy', 'replication_factor' : 1};
 CREATE TABLE ragna.blocks (cid ascii, sha256 blob, size int, enckey blob, nonce blob, pinned boolean, PRIMARY KEY(cid));
 CREATE TABLE ragna.files (key ascii, namespace ascii, blocks frozen<list<ascii>>, modified_at timestamp, PRIMARY KEY (key, namespace));
 
-
 # start the ipfs daemon
+# make sure you edit the config to suit your needs
 $ ipfs daemon 
 
-
 # start ragna
+# (use -help to see all options)
 $ go run api/main.go
 
 

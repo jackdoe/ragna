@@ -233,7 +233,7 @@ func WriteObject(blockSize int, ns string, key string, body io.Reader, session *
 				return err
 			}
 			ids = append(ids, cid)
-			log.Infof("  key: %s:%s creating block cid: %s [pin: %v], size %d, took %d", ns, key, cid, pin, len(part), time.Since(t0).Nanoseconds()/1e6)
+			log.Infof("  key: %s:%s creating block cid: %s [pin: %v], size %d, took %dms", ns, key, cid, pin, len(part), time.Since(t0).Nanoseconds()/1e6)
 		}
 		if end {
 			break
@@ -330,7 +330,7 @@ func (c *ChunkReader) ReadBlock() error {
 		}
 	}
 
-	log.Printf("  key: %s:%s reading block %s, size: %d, took: %d", c.ns, c.key, cid, size, time.Since(t0).Nanoseconds()/1e6)
+	log.Printf("  key: %s:%s reading block cid: %s, size: %d, took: %dms", c.ns, c.key, cid, size, time.Since(t0).Nanoseconds()/1e6)
 	c.blockIndex++
 	return nil
 }
