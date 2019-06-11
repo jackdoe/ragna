@@ -27,7 +27,7 @@ $ sudo docker run -p 9042:9042 scylladb/scylla
 $ sudo docker exec -t -i $( sudo docker ps | grep scylla | awk '{ print $1 }') cqlsh
 
 CREATE KEYSPACE "ragna"  WITH REPLICATION = { 'class' : 'SimpleStrategy', 'replication_factor' : 1};
-CREATE TABLE ragna.blocks (id timeuuid, cid varchar, sha256 blob, size int, enckey blob, nonce blob, PRIMARY KEY(id));
+CREATE TABLE ragna.blocks (id timeuuid, cid varchar, sha256 blob, size int, enckey blob, nonce blob, pinned boolean, PRIMARY KEY(id));
 CREATE TABLE ragna.files (key ascii, namespace ascii, blocks frozen<list<uuid>>, modified_at timestamp, PRIMARY KEY (key, namespace));
 
 $ ipfs daemon
@@ -222,7 +222,7 @@ func WriteObject(blockSize int, ns string, key string, body io.Reader, session *
 				return err
 			}
 
-			if err := session.Query(`INSERT INTO blocks (id,  cid, size, sha256, enckey, nonce) VALUES (?, ?, ?, ?, ?, ?)`, id, cid, len(part), sum, enckey, nonce).Exec(); err != nil {
+			if err := session.Query(`INSERT INTO blocks (id,  cid, size, sha256, enckey, nonce, pinned) VALUES (?, ?, ?, ?, ?, ?, ?)`, id, cid, len(part), sum, enckey, nonce, pin).Exec(); err != nil {
 				log.Warnf("error inserting, key: %s:%s, block id: %s, error: %s", ns, key, id, err.Error())
 				if err := DeleteTransaction(ids, session, sh); err != nil {
 					return err
