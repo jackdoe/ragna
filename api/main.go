@@ -27,8 +27,8 @@ $ sudo docker run -p 9042:9042 scylladb/scylla
 $ sudo docker exec -t -i $( sudo docker ps | grep scylla | awk '{ print $1 }') cqlsh
 
 CREATE KEYSPACE "ragna"  WITH REPLICATION = { 'class' : 'SimpleStrategy', 'replication_factor' : 1};
-CREATE TABLE ragna.blocks (id timeuuid, cid varchar, sha256 blob, size int, enckey blob, nonce blob, pinned boolean, PRIMARY KEY(id));
-CREATE TABLE ragna.files (key ascii, namespace ascii, blocks frozen<list<uuid>>, modified_at timestamp, PRIMARY KEY (key, namespace));
+CREATE TABLE ragna.blocks (cid ascii, sha256 blob, size int, enckey blob, nonce blob, pinned boolean, PRIMARY KEY(cid));
+CREATE TABLE ragna.files (key ascii, namespace ascii, blocks frozen<list<ascii>>, modified_at timestamp, PRIMARY KEY (key, namespace));
 
 $ ipfs daemon
 
@@ -134,12 +134,16 @@ func main() {
 	log.Fatal(http.ListenAndServe(*pbind, nil))
 }
 
-func DeleteTransaction(tx []gocql.UUID, session *gocql.Session, sh *shell.Shell) error {
+func DeleteTransaction(tx []string, session *gocql.Session, sh *shell.Shell) error {
 	if len(tx) > 0 {
 		log.Infof("removing transaction %s", tx)
-		if err := session.Query(`DELETE FROM blocks WHERE id IN ?`, tx).Exec(); err != nil {
+		if err := session.Query(`DELETE FROM blocks WHERE cid IN ?`, tx).Exec(); err != nil {
 			log.Warnf("error removing transaction: %s, error: %s", tx, err.Error())
 			return err
+		}
+		for _, b := range tx {
+			// fire and forget
+			Unpin(b, sh)
 		}
 	}
 	return nil
@@ -170,7 +174,7 @@ func DeleteObject(ns string, key string, session *gocql.Session, sh *shell.Shell
 func WriteObject(blockSize int, ns string, key string, body io.Reader, session *gocql.Session, sh *shell.Shell, pin bool) error {
 	log.Infof("setting %s:%s", ns, key)
 	buf := make([]byte, blockSize)
-	ids := []gocql.UUID{}
+	ids := []string{}
 	addOpts := shell.Pin(pin)
 	for {
 		end := false
@@ -196,7 +200,6 @@ func WriteObject(blockSize int, ns string, key string, body io.Reader, session *
 		}
 
 		if cursor > 0 {
-			id := gocql.TimeUUID()
 			part := buf[:cursor]
 			t0 := time.Now()
 			sum := make([]byte, 32)
@@ -222,15 +225,15 @@ func WriteObject(blockSize int, ns string, key string, body io.Reader, session *
 				return err
 			}
 
-			if err := session.Query(`INSERT INTO blocks (id,  cid, size, sha256, enckey, nonce, pinned) VALUES (?, ?, ?, ?, ?, ?, ?)`, id, cid, len(part), sum, enckey, nonce, pin).Exec(); err != nil {
-				log.Warnf("error inserting, key: %s:%s, block id: %s, error: %s", ns, key, id, err.Error())
+			if err := session.Query(`INSERT INTO blocks (cid, size, sha256, enckey, nonce, pinned) VALUES (?, ?, ?, ?, ?, ?)`, cid, len(part), sum, enckey, nonce, pin).Exec(); err != nil {
+				log.Warnf("error inserting, key: %s:%s, block id: %s, error: %s", ns, key, cid, err.Error())
 				if err := DeleteTransaction(ids, session, sh); err != nil {
 					return err
 				}
 				return err
 			}
-			ids = append(ids, id)
-			log.Infof("  key: %s:%s creating block id: %s [cid: %s pin: %v], size %d, took %d", ns, key, id, cid, pin, len(part), time.Since(t0).Nanoseconds()/1e6)
+			ids = append(ids, cid)
+			log.Infof("  key: %s:%s creating block cid: %s [pin: %v], size %d, took %d", ns, key, cid, pin, len(part), time.Since(t0).Nanoseconds()/1e6)
 		}
 		if end {
 			break
@@ -260,9 +263,12 @@ func WriteObject(blockSize int, ns string, key string, body io.Reader, session *
 
 	log.Printf("removing previous blocks %s", previousBlocks)
 	if len(previousBlocks) > 0 {
-		if err := session.Query(`DELETE FROM blocks WHERE id IN ?`, previousBlocks).Exec(); err != nil {
+		if err := session.Query(`DELETE FROM blocks WHERE cid IN ?`, previousBlocks).Exec(); err != nil {
 			log.Warnf("error removing blocks after upload, orphans %#v, key: %s:%s, error: %s", previousBlocks, ns, key, err.Error())
 			return err
+		}
+		for _, b := range previousBlocks {
+			Unpin(b, sh)
 		}
 	}
 
@@ -270,7 +276,7 @@ func WriteObject(blockSize int, ns string, key string, body io.Reader, session *
 }
 
 type ChunkReader struct {
-	blocks     []gocql.UUID
+	blocks     []string
 	blockIndex int
 	part       []byte
 	cursor     int
@@ -285,13 +291,12 @@ func (c *ChunkReader) ReadBlock() error {
 		return io.EOF
 	}
 	t0 := time.Now()
-	id := c.blocks[c.blockIndex]
-	var cid string
+	cid := c.blocks[c.blockIndex]
 	var sum []byte
 	var enckey []byte
 	var nonce []byte
 	var size int
-	if err := c.session.Query(`SELECT cid, sha256, size, enckey, nonce FROM blocks WHERE id = ?`, id).Consistency(gocql.One).Scan(&cid, &sum, &size, &enckey, &nonce); err != nil {
+	if err := c.session.Query(`SELECT sha256, size, enckey, nonce FROM blocks WHERE cid = ?`, cid).Consistency(gocql.One).Scan(&sum, &size, &enckey, &nonce); err != nil {
 		return err
 	}
 	ipfs, err := c.sh.Cat(cid)
@@ -325,7 +330,7 @@ func (c *ChunkReader) ReadBlock() error {
 		}
 	}
 
-	log.Printf("  key: %s:%s @ %s reading block %s [cid: %s], size: %d, took: %d", c.ns, c.key, id, id, cid, size, time.Since(t0).Nanoseconds()/1e6)
+	log.Printf("  key: %s:%s reading block %s, size: %d, took: %d", c.ns, c.key, cid, size, time.Since(t0).Nanoseconds()/1e6)
 	c.blockIndex++
 	return nil
 }
@@ -343,8 +348,8 @@ func (c *ChunkReader) Read(p []byte) (int, error) {
 	return n, nil
 }
 
-func GetBlocks(ns, key string, session *gocql.Session, sh *shell.Shell) ([]gocql.UUID, error) {
-	var blocks []gocql.UUID
+func GetBlocks(ns, key string, session *gocql.Session, sh *shell.Shell) ([]string, error) {
+	var blocks []string
 	if err := session.Query(`SELECT blocks FROM files WHERE key = ? AND namespace=?`, key, ns).Consistency(gocql.One).Scan(&blocks); err != nil {
 		if err == gocql.ErrNotFound {
 			return nil, errNotFound
@@ -354,6 +359,15 @@ func GetBlocks(ns, key string, session *gocql.Session, sh *shell.Shell) ([]gocql
 	}
 
 	return blocks, nil
+}
+
+func Unpin(cid string, sh *shell.Shell) {
+	err := sh.Unpin(cid)
+	if err != nil {
+		log.Infof("    unpinning %s, err: %s", cid, err.Error())
+	} else {
+		log.Infof("    unpinning %s, success", cid)
+	}
 }
 
 func ReadObject(ns string, key string, session *gocql.Session, sh *shell.Shell) (*ChunkReader, error) {
